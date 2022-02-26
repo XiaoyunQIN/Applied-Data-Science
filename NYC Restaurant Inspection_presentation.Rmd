@@ -1,0 +1,542 @@
+---
+title: "Data Ranger"
+subtitle: 'Xinyue Li, Xiaoyun Qin, Lei Huang, Mehak khara'
+output:
+  slidy_presentation: default
+  ioslides_presentation: default
+  beamer_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+setwd("~/Downloads")
+```
+
+```{r library, include=FALSE}
+library(data.table)
+library(magrittr)
+library(dplyr)
+library(data.table)
+library(DT)
+library(devtools)
+library(ggplot2)
+library(arules)
+library(arulesViz)
+library(RColorBrewer)
+library(readxl)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r read_data_intro, echo=FALSE}
+dat <- fread(input = "../Data/NYC_Restaurant_Inspection_Results.csv", verbose = FALSE)
+```
+
+```{r defining variables, echo = FALSE}
+id.name <- "CAMIS"
+restaurant.name <- "DBA"
+borough.name <- "BORO"
+building.name <- "BUILDING"
+street.name <- "STREET"
+zipcode.name <- "ZIPCODE"
+phone.name <- "PHONE"
+cuisine.name <- "CUISINE DESCRIPTION"
+inspection.date.name <- "INSPECTION DATE"
+action.name <- "ACTION"
+violation.code.name <- "VIOLATION CODE"
+violation.content.name <- "VIOLATION DESCRIPTION"
+critical.flag.name <- "CRITICAL FLAG"
+score.name <- "SCORE"
+grade.name <- "GRADE"
+grade.date.name <- "GRADE DATE"
+record.date.name <- "RECORD DATE"
+inspection.type.name <- "INSPECTION TYPE"
+season.name <- "Season"
+mean.borough.score.name <- 'mean.borough.score'
+number.violation <-'number of violation'
+yelp.zip.code.name <- 'postal_code'
+mean.zip.score.name <-'mean.zip.score'
+
+cuisine_country <- c("Chilean","Basque","Czech","Iranian","Irish","Scandinavian","Portuguese","Moroccan","Afghan"
+                     ,"Egyptian","Armenian","Brazilian","Polish"
+                     ,"Pakistani","Filipino","Bangladeshi","Russian","Turkish","African","Peruvian","Greek"
+                     ,"Middle Eastern","Southwestern"
+                     ,"Eastern European"
+                     ,"Mediterranean","French","German","English"
+                     ,"Jewish/Kosher","Southwestern","Spanish","Caribbean"
+                     ,"Latin (Cuban, Dominican, Puerto Rican, South & Central American)"
+                     ,"American","Californian","Hawaiian"
+                     ,"Pizza/Italian"
+                     ,"Asian","Chinese","Chinese/Cuban","Chinese/Japanese","Korean","Vietnamese/Cambodian/Malaysia"
+                     ,"Thai","Indonesian","Indian"
+                     ,"Cajun","Creole/Cajun","Creole","Tapas","Continental","Tex-Mex")
+cuisine_type <- c("Pizza","Soul Food","CafÃ©/Coffee/Tea"
+                  ,"Barbecue","Delicatessen","Salads"
+                  ,"Steak","Vegetarian","Hamburgers"
+                  ,"Chicken","Bakery","Pancakes/Waffles"
+                  ,"Donuts","Hotdogs","Hotdogs/Pretzels"
+                  ,"Bagels/Pretzels","Ice Cream, Gelato, Yogurt, Ices"
+                  ,"Nuts/Confectionary"
+                  ,"Bottled beverages, including water, sodas, juices, etc."
+                  ,"Juice, Smoothies, Fruit Salads"
+                  ,"Soups,Fruits/Vegetables"
+                  ,"Soups & Sandwiches,Sandwiches"
+                  ,"Sandwiches/Salads/Mixed Buffet"
+                  ,"Cajun","Creole/Cajun","Creole","Tapas","Continental","Tex-Mex","Pizza/Italian"
+                  #Not Listed/Not Applicable
+                  #Other
+)
+
+
+```
+
+```{r functions, echo=F}
+round.numerics <- function(x, digits){
+  if(is.numeric(x)){
+    x <- round(x = x, digits = digits)
+  }
+  return(x)
+}
+
+percentage.table <- function(x, digits = 1){
+  tab <- table(x)
+  percentage.tab <- 100*tab/(sum(tab))
+  rounded.tab <- round(x = percentage.tab, digits = digits)
+  return(rounded.tab)
+}
+
+logistic.regression.summary <- function(glm.mod, digits = 3, alpha = 0.05) {  
+  glm.coefs <- as.data.table(summary(glm.mod)$coefficients, keep.rownames = TRUE) 
+  setnames(x = glm.coefs, old = "rn", new = "Variable")  
+  z <- qnorm(p = 1 - alpha/2, mean = 0, sd = 1)  
+  glm.coefs[, Odds.Ratio := exp(Estimate)]  
+  glm.coefs[, OR.Lower.95 := exp(Estimate - z * `Std. Error`)]  
+  glm.coefs[, OR.Upper.95 := exp(Estimate + z * `Std. Error`)]
+  mod.summary.rounded <- glm.coefs[, lapply(X = .SD, FUN = "round.numerics", digits = digits)]
+  return(mod.summary.rounded[])
+}
+
+
+mean_zip_function = function(dat){
+unique.insp <- dat[, .SD[1L], by=c(id.name, inspection.date.name)]
+unique.insp[,eval('mean.zip.score') := mean((get(score.name)),na.rm = TRUE),,by = zipcode.name]
+mean_zip_score = unique.insp[,.('zipcode' = unique(get(zipcode.name)), 'mean.zip.score' = unique(get(mean.zip.score.name)))]
+mean_zip_score <-setorderv(x = mean_zip_score, cols = 'mean.zip.score', order = -1)
+  return(mean_zip_score)
+}
+
+mean_borough_fuction = function(dat){
+unique.insp <- dat[, .SD[1L], by=c(id.name, inspection.date.name)]
+unique.insp[,eval('mean.borough.score') := mean((get(score.name)),na.rm = TRUE),,by = borough.name]
+mean_borough_score = unique.insp[,.('borough' = unique(get(borough.name)), 'mean.borough.score' = unique(get(mean.borough.score.name)))]
+mean_borough_score <-setorderv(x = mean_borough_score, cols = 'mean.borough.score', order = -1)
+mean_borough_score = mean_borough_score[!borough == 'Missing']
+  return(mean_borough_score)
+}
+```
+
+
+```{r clean data, echo=F, results="hide"}
+dat[, length(unique(get(id.name)))]
+dat[, length(unique(get(restaurant.name)))]
+#miss match happened here, so multiple restaurants share the same name (probably chain restaurant)
+
+#step 1
+#discard not yet inspected restaurants which have date as 01/01/1900
+inspected <- dat[get(inspection.date.name) != "01/01/1900"]
+inspected[, length(unique(get(id.name)))]
+
+#step 2
+#create "Season" column by inspection date
+inspected[, .(Min_Date = min(get(inspection.date.name)), Max_Date = max(get(inspection.date.name)))]
+inspected[get(inspection.date.name) >= "03/01" & get(inspection.date.name) < "06/01", eval(season.name):= "Spring"]
+inspected[get(inspection.date.name) >= "06/01" & get(inspection.date.name) < "09/01", eval(season.name):= "Summer"]
+inspected[get(inspection.date.name) >= "09/01" & get(inspection.date.name) < "12/01", eval(season.name):= "Fall"]
+inspected[get(inspection.date.name) >= "12/01" | get(inspection.date.name) < "03/01", eval(season.name):= "Winter"]
+
+#step 3
+#convert inspection date into orderable format
+inspected$`INSPECTION DATE` <- inspected[, paste(substr(get(inspection.date.name), start = 7, stop=10), substr(get(inspection.date.name), start=1, stop=2), substr(get(inspection.date.name), start=4, stop=5), sep="-")]
+
+#step 4
+inspected[, unique(get(cuisine.name))]
+############ categorize cuisine description #################
+# Add one more column. If the cuisine description is a country
+#, cuisine_country will be 1 , otherwise it is 0
+inspected[,cuisine_country := ifelse(get(cuisine.name) %in% cuisine_country ,1,0)]
+# Add one more column. If the cuisine description is a food type
+#, cuisine_type will be 1 , otherwise it is 0
+# exclude "Not Listed/Not Applicable" and "Other"
+inspected[,cuisine_type := ifelse(get(cuisine.name) %in% cuisine_type ,1,0)]
+
+#step 5
+#clean score values
+scored <- inspected[is.na(get(score.name))== FALSE]
+scored[, unique(get(inspection.type.name))]
+not.score <- c("Smoke-Free Air Act / Re-inspection", "Administrative Miscellaneous / Re-inspection", "Trans Fat / Re-inspection")  
+scored <- scored[!(get(inspection.type.name) %in% not.score)]
+scored[get(score.name)==-1]  #not entered correctly, should have a normal value
+scored <- scored[get(score.name)!=-1]
+```
+```{r cleaning violation description, echo=F, results="hide"}
+#step 6
+#clean violations
+scored[, viols := "Others"]
+# scored[get(violation.content.name) == "Filth flies or food/refuse/sewage-associated (FRSA) flies present in facility\032s food and/or non-food areas. Filth flies include house flies, little house flies, blow flies, bottle flies and flesh flies. Food/refuse/sewage-associated flies include fruit flies, drain flies and Phorid flies.", viols := "Filth flies"]
+# scored[get(violation.content.name) == "Evidence of mice or live mice present in facility's food and/or non-food areas.", viols := "Live/trace of mice/rats"]
+# scored[get(violation.content.name) == "Live roaches present in facility's food and/or non-food areas." , viols := "Live roaches"]
+# scored[get(violation.content.name) == "Evidence of rats or live rats present in facility's food and/or non-food areas.", viols := "Live/trace of mice/rats"]
+# scored[get(violation.content.name) == "Live animals other than fish in tank or service animal present in facility's food and/or non-food areas.", viols := "Other live animals"]
+
+animals <- c("Filth flies or food/refuse/sewage-associated (FRSA) flies present in facility\032s food and/or non-food areas. Filth flies include house flies, little house flies, blow flies, bottle flies and flesh flies. Food/refuse/sewage-associated flies include fruit flies, drain flies and Phorid flies.", "Evidence of mice or live mice present in facility's food and/or non-food areas.", "Live roaches present in facility's food and/or non-food areas.", "Evidence of rats or live rats present in facility's food and/or non-food areas.", "Live animals other than fish in tank or service animal present in facility's food and/or non-food areas.")
+
+food.temp <- c("Hot food item not held at or above 140?,º F.", "Food not cooled by an approved method whereby the internal product temperature is reduced from 140?,º F to 70?,º F or less within 2 hours, and from 70?,º F to 41?,º F or less within 4 additional hours.", "Thawing procedures improper.", "Insufficient or no refrigerated or hot holding equipment to keep potentially hazardous foods at required temperatures.", "Cold food item held above 41?,º F (smoked fish and reduced oxygen packaged foods above 38 ?,ºF) except during necessary preparation.", "Food prepared from ingredients at ambient temperature not cooled to 41?,º F or below within 4 hours.", "Food not cooked to required minimum temperature.", "Hot food item that has been cooked and refrigerated is being held for service without first being reheated to 1 65?,º F or above within 2 hours.", "Precooked potentially hazardous food from commercial food processing establishment that is supposed to be heated, but is not heated to 140?,º F within 2 hours.", "Meat, fish or molluscan shellfish served raw or undercooked without prior notification to customer.", "Whole frozen poultry or poultry breasts, other than a single portion, is being cooked frozen or partially thawed.", "Reduced oxygen packaged (ROP) foods not cooled by an approved method whereby the internal food temperature is reduced to 38?,º F within two hours of cooking and if necessary further cooled to a temperature of 34?,º F within six hours of reaching 38?,º F.")
+
+food.contamination <- c("Raw, cooked or prepared food is adulterated, contaminated, cross-contaminated, or not discarded in accordance with HACCP plan.", "Food not protected from potential source of contamination during storage, preparation, transportation, display or service.", "Eggs found dirty/cracked; liquid, frozen or powdered eggs not pasteurized.", "Unpasteurized milk or milk product present.", "Raw food not properly washed prior to serving.")
+
+facility.clean <- c("Food contact surface not properly maintained.", "Facility not vermin proof. Harborage or conditions conducive to attracting vermin to the premises and/or allowing vermin to exist.", "Sanitized equipment or utensil, including in-use food dispensing utensil, improperly used or stored.", "Proper sanitization not provided for utensil ware washing operation.", "Food contact surface not properly washed, rinsed and sanitized after each use and following any activity when contamination may have occurred.", "Wiping cloths soiled or not stored in sanitizing solution.", "Covered garbage receptacle not provided or inadequate, except that garbage receptacle may be uncovered during active use. Garbage storage area not properly constructed or maintained; grinder or compactor dirty.", "No facilities available to wash, rinse and sanitize utensils and/or equipment.", "Food, food preparation area, food storage area, area used by employees or patrons, contaminated by sewage or liquid waste.")
+
+facility.use <- c("Plumbing not properly installed or maintained; anti-siphonage or backflow prevention device not provided where required; equipment or floor not properly drained; sewage disposal system in disrepair or not functioning properly.", "Non-food contact surface improperly constructed. Unacceptable material used. Non-food contact surface or equipment improperly maintained and/or not properly sealed, raised, spaced or movable to allow accessibility for cleaning on all sides, above and underneath the unit.", "Accurate thermometer not provided in refrigerated or hot holding equipment.", "Food contact surface improperly constructed or located. Unacceptable material used.", "Single service item reused, improperly stored, dispensed; not used when required.", "Appropriately scaled metal stem-type thermometer or thermocouple not provided or used to evaluate temperatures of potentially hazardous foods during cooking, cooling, reheating and holding.", "Sewage disposal system improper or unapproved.","Mechanical or natural ventilation system not provided, improperly installed, in disrepair and/or fails to prevent excessive build-up of grease, heat, steam condensation vapors, odors, smoke, and fumes.")
+
+worker.clean <- c("Hand washing facility not provided in or near food preparation area and toilet room. Hot and cold running water at adequate pressure to enable cleanliness of employees not provided at facility. Soap and an acceptable hand-drying device not provided.", "Personal cleanliness inadequate. Outer garment soiled with possible contaminant.  Effective hair restraint not worn in an area where food is prepared.", "Food worker does not use proper utensil to eliminate bare hand contact with food that will not receive adequate additional heat treatment.", "Food worker does not wash hands thoroughly after using the toilet, coughing, sneezing, smoking, eating, preparing raw foods or otherwise contaminating hands.", "Food worker prepares food or handles utensil when ill with a disease transmissible by food, or have exposed infected cut or burn on hand.")
+
+hazardous.chemicals <- c("Pesticide use not in accordance with label or applicable laws. Prohibited chemical used/stored. Open bait station used.", "Toxic chemical improperly labeled, stored or used such that food contamination may occur.", "Tobacco use, eating, or drinking from open container in food preparation, food storage or dishwashing area observed.", "Harmful, noxious gas or vapor detected. CO ~1 3 ppm.")
+
+unsafety.resource <- c("Food from unapproved or unknown source or home canned. Reduced oxygen packaged (ROP) fish not frozen before processing; or ROP foods prepared on premises transported to another site.", "Canned food product observed dented and not segregated from other consumable food items.", "Shellfish not from approved source, improperly tagged/labeled; tags not retained for 90 days.", "Potable water supply inadequate. Water or ice not potable or from unapproved source.  Cross connection in potable water supply system observed.", "Canned food product observed swollen, leaking or rusted, and not segregated from other consumable food items .", "Unprotected potentially hazardous food re-served.", "Unprotected food re-served.")
+
+regulation <- c("Food Protection Certificate not held by supervisor of food operations.", "''''Wash hands\032 sign not posted at hand wash facility.", "HACCP plan not approved or approved HACCP plan not maintained on premises.", "Duties of an officer of the Department interfered with or obstructed.", "Food service operation occurring in room used as living or sleeping quarters.", "Toilet facility not provided for employees or for patrons when required.", "Toilet facility not maintained and provided with toilet paper, waste receptacle and self-closing door.", "Lighting inadequate; permanent lighting not provided in food preparation areas, ware washing areas, and storage rooms.", "Records and logs not maintained to demonstrate that HACCP plan has been properly implemented.", "Food not labeled in accordance with HACCP plan.")
+
+scored[get(violation.content.name) %in% food.temp, viols := "Food processing/temperature not met"]
+scored[get(violation.content.name) %in% c(food.contamination, unsafety.resource), viols := "Food contamination/Unsafe food resources"]
+scored[get(violation.content.name) %in% facility.clean, viols := "Facility cleanliness"]
+scored[get(violation.content.name) %in% facility.use, viols := "Facility improperly used"]
+scored[get(violation.content.name) %in% worker.clean, viols := "Worker hygiene"]
+scored[get(violation.content.name) %in% hazardous.chemicals, viols := "Hazardous chemicals found"]
+scored[get(violation.content.name) %in% regulation, viols := "Regulation issues"]
+scored[get(violation.content.name) %in% animals, viols := "Filth animals: mice/rats/roaches/flies"]
+
+percentage.table(scored$viols)
+
+```
+
+```{r clean cuisine,echo=F}
+# step 7 Cleaning the cuisines 
+American <- c("American", "Californian")
+Deli <- c("Sandwiches","Sandwiches/Salads/Mixed Buffet","Soups & Sandwiches")
+Pizza <- c("Pizza", "Pizza/Italian")
+Caribbean<- c("Caribbean","Creole/Cajun","Creole","Cajun")
+Cafe <- c("CafÃ©/Coffee/Tea")
+Hotdogs <- c("Bagels/Pretzels", "Hotdogs/Pretzels","Hotdogs")
+drink <- c("Juice, Smoothies, Fruit Salads", "Bottled beverages, including water, sodas, juices, etc.","Soups")
+vegetarian <- c("Vegetarian", "Fruits/Vegetables", "Nuts/Confectionary")
+Asian <- c("Vietnamese/Cambodian/Malaysia", "Asian")
+
+scored[, cuisine := get(cuisine.name)]
+scored[get(cuisine.name) %in% American, cuisine := "American"]
+scored[get(cuisine.name) %in% Deli, cuisine := "Deli"]
+scored[get(cuisine.name) %in% Pizza, cuisine := "Pizza"]
+scored[get(cuisine.name) %in% Caribbean, cuisine := "Caribbean"]
+scored[get(cuisine.name) %in% Hotdogs, cuisine := "Hotdogs"]
+scored[get(cuisine.name) %in% drink, cuisine := "Beverage/Juice/Soup"]
+scored[get(cuisine.name) %in% vegetarian, cuisine := "Vegetarian"]
+scored[get(cuisine.name) %in% Asian, cuisine := "Asian"]
+```
+
+```{r cleaning continue,echo=F}
+#step 7
+#get recent 3 years
+scored.recent <- scored[get(inspection.date.name) >= "2016-01-01",]
+
+#step 9
+#remove missing borough
+scored.recent <- scored.recent[get(borough.name)!="Missing"]
+```
+
+```{r separate by year, echo=F}
+#data by years
+dat2016 <- scored[get(inspection.date.name) >= '2016-01-01' & get(inspection.date.name) < "2017-01-01"]
+dat2017 <- scored[get(inspection.date.name) >= '2017-01-01' & get(inspection.date.name) < "2018-01-01"]
+dat2018 <- scored[get(inspection.date.name) >= '2018-01-01' & get(inspection.date.name) < "2019-01-01"]
+```
+
+
+```{r investigate 1:closing & re-closing, echo=F}
+#reduce to single inspection
+unique.insp <- scored.recent[, .SD[1], by=c(id.name, inspection.date.name)]
+
+#1. number of current restaurants that have ever been closed
+closed <- unique.insp[get(action.name)=="Establishment Closed by DOHMH.  Violations were cited in the following area(s) and those requiring immediate action were addressed."]
+n.close <- closed[, length(unique(get(id.name)))]
+#2 top closing chain restaurants
+most.close <- closed[, .N, by=restaurant.name]
+setorderv(most.close, cols = "N", order = -1)
+#3. among ever closed restaurants, what's the rate of re-cloded (bad attitude)
+#**this means this they didn't improve to re-open level on new inspection after closed**
+reclosed <- unique.insp[get(action.name)=="Establishment re-closed by DOHMH"]
+n.reclose <- reclosed[, length(unique(get(id.name)))]
+reclose.rate <- sprintf("%.2f%%", 100*n.reclose/n.close)
+
+```
+
+
+##Disclaimer:The following presentation might ruin your favorite restaurant
+**New York City Restaurant Inspection Results**
+
+## Introduction
+We analysed New York city restaurant inspection results to learn more about the different types of restaurant violations. We were interested to know more about the process behind the grades given to restaurants.
+
+
+![](beware.jpeg)
+
+
+## Description of the Data: 
+We got restaurant inspection data for three years from 2016- 2019. The dataset consists of **383k** rows and **18** variables (long format) . Some of the important variables were:
+
+- **CAMIS**: unique id for each restaurant
+- **Borough**: "Manhattan", "Bronx", "Queens", "Brooklyn", "State Island"
+- **Cuisine**: 84 cuisines
+- **Inspection date**
+- **Violation discription**: 92 types
+- **Critical Flag**: "Not Critical", "Critical", "Not Applicable"
+- **Score**: numeric from -1 to 156
+- **Grade**: "A", "B", "C", "P", "Not Yet Graded"
+
+
+
+## Grading process
+On inspection, restaurants are assigned points for each violation the inspector finds. The rules call for assigning 7 for public health violation, 5 for critical violation and 2 for general violation. Based on their score they are assigned a grade. 
+
+
+![](grade.png)
+
+
+##Data Cleaning 
+Like every dataset, our dataset required data cleaning as well.We took the following steps to prepare the data for analysis. 
+
+
+- Removed the restaurants that haven't been inspected yet
+- Corrected the format of the date
+- Regrouped the Violation discription
+- Regrouped the cuisine Information
+- Investigated and fixed missing values
+- Geocoded data with Google API key
+
+##Analysis and Exploration
+We explored the data to understand the trends of violations in New York city. Here are some interesting insights from our data set. 
+
+
+![](data.png)
+
+
+##Restaurants near Columbia University with the most number of violations in three years
+
+```{r Columbia Critical}
+
+
+Columbia <- dat[ZIPCODE=="10025" , .(get(restaurant.name),get(borough.name), get(score.name), get(critical.flag.name), get(grade.name), get(violation.content.name)), by = id.name]
+colnames(Columbia) <- c(id.name, restaurant.name, borough.name, score.name, critical.flag.name, critical.flag.name, violation.content.name)
+
+Critical <- Columbia[, .("Total Violations"= .N), by = restaurant.name]
+colnames(Critical) = c("Restaurant Name", "Total Violations")
+setorderv(Critical, cols = "Total Violations", order= -1)
+datatable(Critical[1:10,])
+```
+
+## Grade A restaurants with evidence of Mice, filth flies and Roaches
+![](mice.jpeg)
+```{r insestigate: violation description, echo=F}
+#1. Most common violation
+viol.count <- scored.recent[, .N, by=violation.content.name]
+setorderv(viol.count, cols = "N", order = -1)
+#2. Violations among A grade restaurants
+viol.type <- scored.recent[,unique(viols)]
+viols.A <- scored.recent[get(grade.name)=="A" & viols == viol.type[2]]
+n.viol.A <- viols.A[, .(viol_num = length(unique(get(id.name)))), keyby=borough.name]
+n.res <- scored.recent[, .(rest_num = length(unique(get(id.name)))), keyby=borough.name]
+table <- merge(n.res, n.viol.A, by="BORO")
+table[,viol_rate := 100*viol_num/rest_num]
+```
+```{r grade A mice, echo=F}
+barplot(height = table$viol_rate, names.arg = table$BORO, space=0.01, las = 1, main = "Rats/Roaches/Flies Violations of Grade `A` Restaurants", ylab = "percentage of restaurants", ylim = c(0, 1.5*max(table$viol_rate, na.rm = TRUE)), cex.names = 0.8, col = "pink")
+space_val = 0
+text(x = -0.4 + 1:length(table$viol_rate) * (1+space_val), y = table$viol_rate, labels = sprintf("%.1f%%", table$viol_rate), pos = 3)
+library(RColorBrewer)
+```
+
+
+## Top chain restaurants closed due to violations
+
+```{r closed, Echo= FALSE}
+most.close <- closed[, .("Total outlets closed"= .N), by=restaurant.name]
+# total.restaurants.number <- scored.recent[, .("Total number of restaurants"= .N), by=restaurant.name]
+# most.close.ratio <- merge(x = most.close, y = total.restaurants.number, by.x = 'Chain Name',by.y = 'DBA',all.x = TRUE,all.y = FALSE)
+# total.name <- "Total outlets closed"
+# total.res <- "Total number of restaurants"
+# most.close.ratio[,eval('ratio'):= total.name/total.res]
+setorderv(most.close, cols = "Total outlets closed", order = -1)
+colnames(most.close)<- c("Chain Name", "Total outlets closed")
+datatable(most.close[1:5,])
+```
+
+
+
+```{r cuisines, echo=F}
+# Top cuisines with the most violations
+# violation_cnt <- scored.recent[,.N, by = c("cuisine",critical.flag.name )]
+# unique_restaurant <- scored.recent[, .SD[1], by = id.name]
+# restaurant_cnt <- unique_restaurant[,.N, by = cuisine]
+#   # merge two dataset
+# violation_per_resaturant <- merge(violation_cnt
+#                                     ,restaurant_cnt
+#                                     ,by = "cuisine")
+# names(violation_per_resaturant) <- c("cuisine","CRITICAL FLAG"
+#                                        ,"violation_cnt","restaurant_cnt")
+# # calculate the violation times per resaturant by country
+# violation_per_resaturant[,violation_per_resaturant := get("violation_cnt")/get("restaurant_cnt")]
+# violation_per_resaturant <- violation_per_resaturant[, lapply(X = .SD
+#                                                                 , FUN = "round.numerics"
+#                                                         , 2)]
+# violation_per_resaturant[,vio_per_res_sum:= sum(violation_per_resaturant)
+#                                                 ,by = cuisine]
+# violation_per_resaturant <- violation_per_resaturant[order(vio_per_res_sum
+#                                                              ,decreasing = TRUE)]
+# cuisine_list = unique(violation_per_resaturant[1:15,cuisine])
+# 
+# ggplot(violation_per_resaturant[1:15,],aes(cuisine
+#                                                ,violation_per_resaturant
+#                                                ,fill=`CRITICAL FLAG`))+
+#       geom_bar(stat="identity",position="stack")+
+#       labs(x = "Cuisine", y = "Average Number of Violation" ,colour = "Critical type")+
+#     ggtitle("Top Cuisines with the Most Violations") + 
+#   scale_x_discrete(limits=cuisine_list) +# change the order of x
+#   geom_text(aes(label=violation_per_resaturant),size= 5,position = position_stack(vjust = 0.5))
+# 
+
+```
+
+
+
+
+
+
+## Violations trends in different seasons 
+
+```{r season, Echo= FALSE}
+# seasonal counts
+n.viol <- scored.recent[, .(viol_num = .N), by=season.name]
+n.insp <- unique.insp[, .(insp_num = .N), by=season.name]
+p.critical <- scored.recent[, .(p.critical = mean(get(critical.flag.name)=="Critical")), by=season.name]
+
+season.table <- merge(n.viol,n.insp,by=season.name)
+season.table <- season.table[, avg_vio := viol_num/insp_num] %>%
+  .[, viol_num := NULL] %>%
+  merge(., p.critical, by=season.name)
+setorderv(season.table, cols = "avg_vio", -1)
+datatable(season.table, colnames = c("Season", "Inspection numbers", "average number of violations", "Percentage of Critical violations"), rownames = F) %>%
+  formatPercentage(4, 2) %>%
+  formatRound(3, 2)
+
+
+```
+
+
+
+
+
+
+
+##Average violation score by borough
+```{r}
+
+#scored.recent$`INSPECTION DATE` = as.Date(scored.recent$`INSPECTION DATE`, "%m/%d/%Y")
+dat2016 <- scored.recent[get(inspection.date.name) >= '2016-01-01' & get(inspection.date.name) < "2017-01-01"]
+dat2017 <- scored.recent[get(inspection.date.name) >= '2017-01-01' & get(inspection.date.name) < "2018-01-01"]
+dat2018 <- scored.recent[get(inspection.date.name) >= '2018-01-01' & get(inspection.date.name) < "2019-01-01"]
+
+mean_borough_score2016= mean_borough_fuction(dat2016)
+mean_borough_score2017= mean_borough_fuction(dat2017)
+mean_borough_score2018= mean_borough_fuction(dat2018)
+
+mean_borough_score2016[,eval('year'):='2016']
+mean_borough_score2017[,eval('year'):='2017']
+mean_borough_score2018[,eval('year'):='2018']
+
+mean_borough_score_3 = rbind(mean_borough_score2016,
+mean_borough_score2017,
+mean_borough_score2018)
+
+ggplot(mean_borough_score_3, aes(x = year, y = mean.borough.score, color = borough,group = borough)) + 
+  geom_line() +
+  geom_point()
+```
+
+
+
+
+
+
+
+
+## Association Rule Learning
+```{r Association rules learning, echo= F, results= 'hide',warning=FALSE,message=FALSE,fig.keep = 'none'}
+retail <- scored.recent
+retail <- retail[complete.cases(retail), ]
+
+#re-structure data
+# retail$`VIOLATION CODE` = as.factor(retail$`VIOLATION CODE`)
+# baskets = retail %>%
+#   arrange(desc(CAMIS))%>%
+#   group_by(CAMIS,`INSPECTION DATE`)%>%
+#   summarise(items = paste(`VIOLATION CODE`,collapse=','))
+# baskets$CAMIS=NULL
+# baskets$`INSPECTION DATE`=NULL
+# write.csv(baskets,'baskets.csv',quote = F,row.names = F)
+
+
+#library(devtools)
+#install_github("mhahsler/arulesViz")
+
+#read in data
+items = read.transactions('baskets.csv', format = 'basket', sep=',',skip=1)
+dim(items)
+itemFrequencyPlot(items, support = 0.04, cex.names=0.8, 
+                  type = "relative", horiz = TRUE, col = "dark red", las = 1,
+                  xlab = paste("Proportion of Market Baskets Containing Item",
+                               "\n(Item Relative Frequency or Support)"))
+#crosstab = crossTable(items, measure="count", sort=TRUE)
+#datatable(crosstab)
+
+#learning
+rules1 = apriori(items,parameter = list(support = 0.005, confidence = 0.05))
+#summary(rules1)
+#inspect(rules1)
+
+#plot
+
+plot(rules1,control=list(jitter=2, col = rev(brewer.pal(9, "Greens")[4:9])),shading = "lift")
+top_rule1 = sort(rules1,decreasing=T,by='lift')
+
+
+```
+
+```{r Association Rule  plot,echo= F, results= 'hide',warning=FALSE,message=FALSE}
+plot(top_rule1[1:8], method="graph",control=list(type="itemset"), shading = "lift")
+```
+
+
+##Conclusion and Insights 
+
+- Grade A restaurants could also have critical violations.
+- Even there are food inspection system, there are increasing trend on violation scores each year.
+- Violation results have seasonal differences, and food inspectors should increase the number of inspections in summer and fall.
+- A platform like ours could help inspectors recognise restaurants with more violations; and strict followups can be initiated to such restaurants.
+- There are relations among violation types. Improving the cleanliness of food-contact faciliaties might largely reduce all the other types of violations.
+
+
+
+
+
+
+
+
+
