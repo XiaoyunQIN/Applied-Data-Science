@@ -1,0 +1,853 @@
+---
+title: "Applied Data Science:  Midterm Project"
+author: 
+  - name: "Xiaoyun Qin"
+    affiliation: "Graduate School of Arts and Sciences, Master of Statistics"
+  - name: " Pei Hsin Chen"
+    affiliation: "School of Professional Studies, Master of Applied Analytics"
+  - name: "Yixuan Wang"
+    affiliation: "Graduate School of Arts and Sciences, Master of Statistics"
+date: "March 13th, 2019"
+output:
+  prettydoc::html_pretty:
+  theme: cayman
+highlight: github
+---
+
+```{r setup, include = FALSE}
+set.seed(5243)
+knitr::opts_chunk$set(echo = TRUE, comment = "", warning = FALSE, message = FALSE, tidy.opts = list(width.cutoff = 55))
+```
+
+```{r libraries, echo = FALSE}
+# Note:  If any of the libraries below generate errors,
+# then use the install.packages function to install them first.
+library(nnet)
+library(data.table)
+library(e1071)
+library(DT)
+library(prettydoc)
+library(glmnet)
+library(randomForest)
+library(class)
+library(rpart)
+library(xgboost)
+library(dplyr)
+library(caret)
+```
+
+```{r source_files, echo = FALSE, tidy = TRUE}
+train.file <- "../Data/MNIST-fashion training set-49.csv"
+test.file <- "../Data/MNIST-fashion testing set-49.csv"
+```
+
+```{r functions, echo = FALSE, tidy = TRUE}
+# calcualte the percentage of correct predictions
+percentage.correctly.classified <- function(predicted, actual, na.rm = TRUE) {
+  return(mean(predicted == actual, na.rm = na.rm))
+}
+# round our numerical results to 4 digits
+round.numerics <- function(x, digits){
+  if(is.numeric(x)){
+    x <- round(x = x, digits = digits)
+  }
+  return(x)
+}
+# combine the results from a model
+model.results <- function(prop.rf, time.rf, error.rf
+                          , Points.rf, techniques){
+  model.rf.1 <- data.table("Model" = rep(techniques, 9)
+                         ,"Sample Size" = c(rep(500, 3), rep(1000, 3), rep(2000, 3))
+                         ,"Data" = sample, "A" = prop.rf, "B" = time.rf
+                         , "C" = error.rf, "Points" = Points.rf)[
+                           , lapply(X = .SD, FUN = "round.numerics", digits = 4)]
+  model.rf.2 <- data.table("Model" = rep(techniques, 3)
+                         ,"Sample Size" = c(500, 1000, 2000))
+  model.rf.2[,"A" := model.rf.1[,mean(get("A"))
+                              , by = "Sample Size"]$V1][
+           ,"B" := model.rf.1[,mean(get("B"))
+                              , by = "Sample Size"]$V1][
+           ,"C" := model.rf.1[,mean(get("C"))
+                              , by = "Sample Size"]$V1][
+           ,"Points" := model.rf.1[, mean(get("Points"))
+                              , by = "Sample Size"]$V1]
+  model.rf.2 <- model.rf.2[, lapply(X = .SD
+                                    , FUN = "round.numerics"
+                                    , digits = 4)]
+  return(list(model.rf.1, model.rf.2))
+}
+# combine the predictions from trainning data
+combines.train.data <- function(i){
+  x.train <- cbind(as.factor(unlist(predict.train.knn[[i]]))
+                     , as.factor(unlist(predict.train.svm.1[[i]]))
+                     , as.factor(unlist(predict.train.svm.2[[i]]))
+                     , as.factor(unlist(predict.train.rf[[i]]))
+                     , as.factor(as.numeric(as.factor(unlist(predict.train.lasso[[i]]))))
+                     , as.factor(as.numeric(as.factor(unlist(predict.train.ridge[[i]]))))
+                     #, as.factor(predict.train.xgb[, i])
+                   )
+  y.train <- dat.total[get("name") == sample[i]
+                              ,-"name"][,1]
+  train.dat <- data.frame(y.train,x.train)
+  return(train.dat)
+}
+# combine the predictions from testing data
+combines.test.data <- function(i){
+  x.test <- cbind(as.factor(predict.knn[, i])
+                     , as.factor(predict.svm.1[, i])
+                     , as.factor(predict.svm.2[, i])
+                     , as.factor(predict.rf[, i])
+                     , as.factor(as.numeric(as.factor(predict.lasso[, i])))
+                     , as.factor(as.numeric(as.factor(predict.ridge[, i])))
+                     #, as.factor(predict.xbg[, i])
+                  )
+  return(data.frame(x.test))
+}
+# select the mode of one row
+row.mode <- function(x) {
+   distinct.x <- unique(x)
+   distinct.x[which.max(tabulate(match(x, distinct.x)))]
+}
+# socreboard function
+socreboard <- function(i) {
+  score <- rbind(results.mult[[i]]
+        ,results.svm.1[[i]]
+        ,results.svm.2[[i]]
+        ,results.rf[[i]]
+        ,results.ridge[[i]]
+        ,results.lasso[[i]]
+        ,results.KNN[[i]]
+        ,results.classification[[i]]
+        ,results.xbg[[i]]
+        #,results.ensembling.rf[[i]]
+        ,results.ensembling.mode[[i]]
+        )
+  return(score[sort(score$Points,index.return=TRUE)$ix,])
+}
+
+```
+
+```{r constants, tidy=TRUE, echo = FALSE}
+n.values <- c(500, 1000, 2000)
+iterations <- 3
+```
+
+```{r load_data, tidy=TRUE, echo = FALSE}
+setwd("~/Desktop/coursework/Applied Data Science/midterm/analysis")
+train <- fread(train.file)
+test <- fread(test.file)
+```
+
+```{r clean_data, tidy = TRUE, echo = FALSE, include = FALSE}
+# data should not have NA
+sum(is.na(rbind(train, test))) == 0
+# data should between 0 and 255
+sum(train[, -1]< 0|train[, -1] > 255) + 
+  sum(test[, -1] < 0|test[, -1]> 255) == 0
+```
+
+```{r generate_samples, tidy=TRUE, echo = FALSE}
+dat_500 <- list()
+for (i in 1:iterations){
+  dat_500[[i]] <- train[sample(1:train[, .N], n.values[1]
+                        , replace = FALSE), ]
+  dat_500[[i]][, eval("name"):= paste("dat_500_", i, sep = "")]
+}
+
+dat_1000 <- list()
+for (i in 1:iterations){
+  dat_1000[[i]] <- train[sample(1:train[, .N], n.values[2]
+                        , replace = FALSE), ]
+  dat_1000[[i]][, eval("name") := paste("dat_1000_", i, sep = "")]
+}
+
+dat_2000 <- list()
+for (i in 1:iterations){
+  dat_2000[[i]] <- train[sample(1:train[, .N], n.values[3]
+                        , replace = FALSE), ]
+  dat_2000[[i]][, eval("name") := paste("dat_2000_", i, sep = "")]
+}
+
+dat.total <- rbind(dat_500[[1]], dat_500[[2]], dat_500[[3]]
+                   , dat_1000[[1]], dat_1000[[2]], dat_1000[[3]]
+                   , dat_2000[[1]], dat_2000[[2]], dat_2000[[3]])
+
+sample <- dat.total[, unique(get("name"))]
+```
+
+## Introduction
+
+Machine learning theory was first established in the mid-20 century, however, the modern machine learning started not until 1990s. One of the reasons why machine learning did not raise its popularity in early stage was that the hardware computing equipments were not advance enough to calculate the mass mathematics. Recently, machine learning is well-known by the public and plays an fundamental role in many aspects of out lives. For instance, predictions, robotics, visual identity systems, and speech recognitions.
+
+In our project, we presented an introduction of different popular machine learning models and aimed to find out the best machine learning model on classification. We used the simplified MNIST Fashion database, with 49 columns include the pixels of the picture of their products and 1 column indicates the label of the clothes. There are 60,000 observations in the training dataset and 10,000 observations in the testing dataset. The training dataset are sampled into 9 samples with 3 different sample size, which are 500, 1000, and 2000. There are 10 machine learning models built as prediction models to be trained with the 9 samples and to make prediction for the testing dataset. The performance of each model is calculated by scores according to the sample size of the training data, the running time, and the error rate. The lower the score is, the better the model is.
+
+For each model, not only a brief introduction and the pros and cons of the model is provided, but the code of model development and the code of computing prediction performance are also illustrated in the project. Moreover, we gave a comparison of each models based on their performance and clearly identify the applicable guideline on choosing different models. It is hoped that the statement described here could serve as the basis understanding of machine learning models.
+
+### Model 1: Multinomial logistic regression 
+
+```{r code_model1_development, eval = TRUE, tidy=TRUE}
+multinom.fit <- function(dat_train
+                        , dat_test
+                        , samplename){
+  
+  variables <- dat_test[, 2:ncol(dat_test)]
+  response <- dat_test[, 1]
+  # fit the model
+  tic <- Sys.time()
+  train.res<-capture.output(fit <- multinom(label ~ . 
+                  , dat_train[get("name") == samplename
+                              , -"name"]))
+  train.predict <- predict(fit, dat_train[get("name") == samplename
+                              , -"name"][, 2:(ncol(dat_train) - 1)])
+  # get the prediction
+  prediction <- predict(fit, variables)
+  toc <- Sys.time()
+  # calculate prediction error
+  predict.error <- mean(as.character(prediction) != 
+                          as.character(unlist(response)))
+  time <- min(1, as.numeric(toc - tic) / 60)
+  proportion <- dat_train[get("name") == samplename, .N] / nrow(train)
+  outcome <- list(proportion, time, predict.error, prediction, train.predict)
+  return(outcome)
+}
+```
+
+```{r load_model1, tidy=TRUE}
+prop.mult <- c()
+time.mult <- c()
+error.mult <- c()
+predict.mult <- matrix(NA, nrow = nrow(test), ncol = 9)
+predict.train.mult <- list()
+for (i in 1:length(sample)){
+  outcome <- multinom.fit(dat_train = dat.total
+                           , dat_test = test
+                           , samplename = sample[i])
+  prop.mult[i] <- outcome[[1]]
+  time.mult[i] <- outcome[[2]]
+  error.mult[i] <- outcome[[3]]
+  #predictions on test data
+  predict.mult[, i] <- outcome[[4]] 
+  #predictions on train data
+  predict.train.mult[i] <- list(outcome[[5]])
+}
+Points.mult <- 0.25 * prop.mult + 0.25 * time.mult + 0.5 * error.mult
+# generate report
+results.mult <- model.results(prop.mult, time.mult, error.mult
+                        , Points.mult, "Multinomial logistic Regression")
+```
+
+Multinomial Logistic Regression is a classical classification method that extended from binary logistic regression. It could be used conduct when the response is nominal with more than two categories. 
+
+Multinomial logistic regression is a good method to do the classification because it is easy to implement and does not need to tune the model. This model could be used as a benchmark to measure the performance of other more complex methods. Besides, one of the biggest advantage of this method is that it does not assume normality, linearity, or homoscedasticity. Like binary logistic regression, multinomial lo gistic regression use uses maximum likelihood estimation to calculate the probability of categorical membership. 
+
+$$P(G=k|X=x)=\frac{exp(\beta_{k0}+\beta_k^Tx)} {1+\sum_{l=1}^{K-1}exp(\beta_{l0}+\beta_l^Tx)},\ k=1,..,K-1$$
+$$P(G=K|X=x)=\frac{1} {1+\sum_{l=1}^{K-1}exp(\beta_{l0}+\beta_l^Tx)},\ k=K$$
+
+However, the predict error is quite high using this method. This may because our problem is not a linear problem that the decision surface is not linear. Multinomial logistic regression is influenced by the collinearity of predict variables like other linear regression and we may need to do something like Feature Engineering to get better input data.
+
+Multinomial logistic regression will be more suitable to use in linear classification situations. If the classification cannot be solved by linear, we may need to consider other methods.
+
+### Model 2: Support Vector Machines - radial
+
+```{r code_model2_development, eval = TRUE, tidy=TRUE}
+svm_fit <- function(dat_train, dat_test, samplename
+                    , gamma, cost, kernel, type){
+  x.ts <- dat_test[, 2:ncol(dat_test)]
+  y.ts <- unlist(dat_test[, 1])
+  # tune the model
+  tic <- Sys.time()
+  tune.gamma <- tune.svm(as.factor(label) ~ .
+             , data = dat_train[get("name") == samplename
+                              , -"name"]
+             , cross = 5, type = type
+             , kernel = kernel
+             , gamma = gamma
+             , cost = cost
+             , scale = TRUE)
+  # fit the model with best paremeters
+  fit <- svm(as.factor(label) ~ .
+             , data = dat_train[get("name") == samplename
+                              , -"name"]
+             , cross = 5, type = type
+             , kernel = kernel
+             , gamma = tune.gamma$best.model[[6]]
+             , cost = cost
+             , scale = TRUE)
+  # get the predictions on training dataset and test dataset
+  train.predict <- predict(fit, dat_train[get("name") == samplename
+                              , -"name"][, 2:(ncol(dat_train) - 1)])
+  predict <- predict(fit, x.ts)
+  toc <- Sys.time()
+  # calculate predict error
+  predict.error <- mean(as.character(predict) != 
+                          as.character(y.ts))
+  time <- min(1, as.numeric(toc - tic) / 60)
+  proportion <- dat_train[get("name") == samplename, .N] / nrow(dat_train)
+  outcome <- list(proportion, time, predict.error, predict, train.predict)
+  return(outcome)
+}
+```
+
+```{r load_model2, tidy=TRUE}
+# after tuning the paramter for many times,
+# I set cost = 10 and gamma between 0.016 and 0.017
+# to find the best parameters for SVM in this dataset
+# This may takes some time to tune the model
+# better from = 0.015,to = 0.017,by=(0.001/4)
+gamma = seq(from = 0.016, to = 0.017, by = (0.001 / 2))
+#gamma = 0.01625
+cost = 10
+# fit the SVM model
+prop.svm.1 <- c()
+time.svm.1 <- c()
+error.svm.1 <- c()
+predict.svm.1 <- matrix(NA, nrow = nrow(test), ncol = 9)
+predict.train.svm.1 <- list()
+for (i in 1:length(sample)){
+  outcome <- svm_fit(dat_train = dat.total
+                          , dat_test = test
+                          , samplename = sample[i]
+                          , gamma, cost
+                          , kernel='radial'
+                          , type='C-classification')
+  prop.svm.1[i] <- outcome[[1]]
+  time.svm.1[i] <- outcome[[2]]
+  error.svm.1[i] <- outcome[[3]]
+  #predictions on test data
+  predict.svm.1[, i] <- outcome[[4]]
+  #predictions on train data
+  predict.train.svm.1[i] <- list(outcome[[5]])
+}
+Points.svm.1 <- 0.25 * prop.svm.1 + 0.25 * time.svm.1 + 0.5 * error.svm.1
+# generate report
+results.svm.1 <- model.results(prop.svm.1, time.svm.1, error.svm.1
+                        , Points.svm.1
+                        , "Support Vector Machines - radial")
+# datatable(results.svm.1[[1]])
+```
+
+Support Vector Machines uses high dimensional hyperplane to classify data through using Kernel functions to map the original data into new space. This method seems to be more suitable for our problems since we found the classification methods like multinomial logistic regression is not good enough. 
+
+Here we use the svm function in nnet package to do the classification. When using this model, we need to tune the model through choosing better type of SVM, the kernel function, gamma, cost and so on. There are four types of SVM in the function to choose: C-classification, nu-classification, one-classification, eps-regression, nu-regression. I chose C-classification because our problem is a classification problem and nu-classification is harder to get the optimize results compared to C-classification. For kernel function, I chose to use the most used type of kernel function, radial basis function (RBF).$K(x,x')=exp(-\gamma||x-x'||^2)$ After tuning the parameters for many times, I fixed cost to be 10 and set gamma between 0.016 and 0.017 to find the best parameters for SVM in this dataset. 
+
+The predict error decrease a lot compare to using multinomial logistic regression but the running time increase a lot. SVM requires some time to tune the model and it is especially a problem when data set is large. As you can see from the score board below, the predict error is around 17% using 2000 training data while the predict error using multinomial logistic regression 25%. It improves the 11% accurate rate. However, the running time is 25 times to multinomial logistic regression making its overall score quite large. 
+
+### Model 3: Support Vector Machines - polynomial
+
+```{r load_model3, tidy=TRUE}
+# after tuning the paramter for many times,
+# I set cost = 100 and gamma between 0.012 and 0.013
+# to find the best parameters for SVM in this dataset
+# This may takes some time to tune the model
+# better from = 0.012,to = 0.013,by=(0.001/4)
+gamma = seq(from = 0.012, to = 0.013, by = (0.001 / 2)) 
+#gamma = 0.0125
+cost = 100
+# fit the SVM model
+prop.svm.2 <- c()
+time.svm.2 <- c()
+error.svm.2 <- c()
+predict.svm.2 <- matrix(NA, nrow = nrow(test), ncol = 9)
+predict.train.svm.2 <- list()
+for (i in 1:length(sample)){
+  outcome <- svm_fit(dat_train = dat.total
+                          , dat_test = test
+                          , samplename = sample[i]
+                          , gamma, cost
+                          , kernel='polynomial'
+                          , type='C-classification')
+  prop.svm.2[i] <- outcome[[1]]
+  time.svm.2[i] <- outcome[[2]]
+  error.svm.2[i] <- outcome[[3]]
+  #predictions on test data
+  predict.svm.2[, i] <- outcome[[4]]
+  #predictions on train data
+  predict.train.svm.2[i] <- list(outcome[[5]])
+}
+Points.svm.2 <- 0.25 * prop.svm.2 + 0.25 * time.svm.2 + 0.5 * error.svm.2
+# generate report
+results.svm.2 <- model.results(prop.svm.2, time.svm.2, error.svm.2
+                        , Points.svm.2
+                        , "Support Vector Machines - polynomial")
+# datatable(results.svm.2[[1]])
+```
+
+This is also a model using Support Vector Machines methods but has different parameters. In this model, we used polynomial($K(x,x')=(1+<x,x'>)^d$) as Kernel to check if this kind of transformation is better than RBF. In this model, I fixed cost to be 100 and set gamma between 0.012 and 0.013 after tuning the model for several times. From the results table, the overall performance of the SVM using polynomial as Kernel function is similar to the SVM using RBF as Kernel function. This method may run quicker but the error rates in different training sets are higher. 
+
+Overall, it’s better to use RBF function. This is also an evidence that radial basis function is the most used type of kernel function and we could better try this function first when we using SVM to solve a problem in the future.
+
+### Model 4: Random Forest
+
+```{r code_model4_development,eval=TRUE, tidy=TRUE}
+random.forest <- function(dat_train, dat_test, samplename){
+  dat_train[, eval("label") := factor(get("label"))]
+  dat_test[, eval("label"):= factor(get("label"))]
+  tic <- Sys.time()
+  mod.rf <- randomForest(formula = label ~. -label
+                         , data = dat_train[get("name") == samplename
+                                            ,-"name"])
+  pred.rf <- predict(object = mod.rf
+                     , newdata = dat_test[,-"label"]
+                     , type = "response")
+  toc <- Sys.time()
+  pred.train.rf <- predict(object = mod.rf
+                           , newdata = dat_train[get("name") == samplename
+                                                , -c("label","name")]
+                           , type = "response")
+  correct.pct.rf <- percentage.correctly.classified(predicted = pred.rf, actual = dat_test[, get("label")])
+  time <- min(1,as.numeric(toc-tic)/60)
+  proportion <- dat_train[get("name") == samplename, .N] / nrow(train)
+  outcome <- list(proportion, time, 1-correct.pct.rf, pred.rf, pred.train.rf)
+  return(outcome)
+}
+```
+
+```{r load_model4,eval=TRUE, tidy=TRUE}
+prop.rf <- c()
+time.rf <- c()
+error.rf <- c()
+predict.rf <- matrix(NA, nrow = nrow(test), ncol = 9)
+predict.train.rf <- list()
+for (i in 1:length(sample)){
+  outcome <- random.forest(dat_train = dat.total
+                           , dat_test = test
+                           , samplename = sample[i])
+  prop.rf[i] <- outcome[[1]]
+  time.rf[i] <- outcome[[2]]
+  error.rf[i] <- outcome[[3]]
+  predict.rf[,i] <- outcome[[4]]
+  predict.train.rf[i] <- list(outcome[[5]])
+}
+Points.rf <- 0.25 * prop.rf + 0.25 * time.rf + 0.5 * error.rf
+# generate report
+results.rf <- model.results(prop.rf, time.rf, error.rf
+                        , Points.rf
+                        ,"Random Forest")
+# datatable(results.rf[[2]])
+```
+
+Random Forest uses the bagging method to generate multiple training datasets and then apply decision tree method to all of them and finally select the most proper outcomes from them. The advantage of random forest is that it can use a small number of data to get quite good results. However, adding more samples cannot greatly improve the accuracy. The results from above show that the accuracy is a big strength of random forest.
+
+### Model 5: Ridge Regression
+
+```{r code_model5_development,eval=TRUE, tidy=TRUE}
+ridge.regression <- function(dat_train, dat_test, samplename){
+  dat_train[, eval("label") := factor(get("label"))]
+  dat_test[, eval("label") := factor(get("label"))]
+  tic <- Sys.time()
+  mod.ridge <- glmnet(x = as.matrix(dat_train[get("name") == samplename
+                                      , -c("label", "name")])
+                      , y = as.factor(dat_train[get("name") == samplename, ]$label)
+                      , family = "multinomial", alpha = 0)
+  pred.ridge <- predict(object = mod.ridge
+                        , newx = as.matrix(dat_test[, -"label"])
+                        , type = "class")[, 100]
+  toc <- Sys.time()
+  pred.train.ridge <- predict(object = mod.ridge
+                              , newx = as.matrix(dat_train[get("name") == samplename
+                                                          , -c("label", "name")])
+                              , type = "class")[, 100]
+  correct.pct.ridge <- percentage.correctly.classified(predicted = pred.ridge
+                                              , actual = dat_test[, get("label")])
+  time <- min(1, as.numeric(toc-tic)/60)
+  proportion <- dat_train[get("name") == samplename, .N] / nrow(train)
+  outcome <- list(proportion, time
+                  , 1-correct.pct.ridge
+                  , pred.ridge
+                  , pred.train.ridge)
+  return(outcome)
+}
+```
+
+```{r load_model5,eval=TRUE, tidy=TRUE}
+prop.ridge <- c()
+time.ridge <- c()
+error.ridge <- c()
+predict.ridge <- matrix(NA,nrow = nrow(test),ncol = 9)
+predict.train.ridge <- list()
+for (i in 1:length(sample)){
+   outcome <- ridge.regression(dat_train = dat.total
+                               , dat_test = test
+                               , samplename = sample[i])
+  prop.ridge[i] <- outcome[[1]]
+  time.ridge[i] <- outcome[[2]]
+  error.ridge[i] <- outcome[[3]]
+  predict.ridge[,i] <- outcome[[4]]
+  predict.train.ridge[i] <- list(outcome[[5]])
+}
+Points.ridge <- 0.25 * prop.ridge + 0.25 * time.ridge + 0.5 * error.ridge
+# generate report
+results.ridge <- model.results(prop.ridge, time.ridge, error.ridge
+                        , Points.ridge
+                        , "Ridge Regression")
+# datatable(results.ridge[[2]])
+```
+
+Ridge regression tries to find \(argmin_{\beta}(Y-X^T\beta)^2+\lambda||\beta||^2\). It adds a penalty term to make the coefficients of variables that are not very relative to or very dependent with other variables very close to 0. It will increase the accuracy of prediction. The advantage of ridge regression is that it can reduce the effect of dependent and irrelevant variables compared to OLS. The disadvantage of ridge regression is that it may not fit specific data very well. Based on the observations above, I find out that the accuracy of this model does not change very much when the sample size of training data changes.
+
+### Model 6: Lasso Regression
+
+```{r code_model6_development,eval=TRUE, tidy=TRUE}
+lasso.regression <- function(dat_train, dat_test, samplename){
+  dat_train[, eval("label") := factor(get("label"))]
+  dat_test[, eval("label") := factor(get("label"))]
+  tic <- Sys.time()
+  mod.lasso <- glmnet(x = as.matrix(dat_train[get("name") == samplename
+                                            , -c("label", "name")])
+                      , y = as.factor(dat_train[get("name") == samplename, ]$label)
+                      , family = "multinomial", alpha = 1)
+  pred.lasso <- predict(object = mod.lasso
+                        , newx = as.matrix(dat_test[, -"label"])
+                        , type = "class")[, 100]
+  toc <- Sys.time()
+  pred.train.lasso <- predict(object = mod.lasso
+                              , newx = as.matrix(dat_train[get("name") == samplename
+                                                          , -c("label", "name")])
+                              , type = "class")[, 100]
+  correct.pct.lasso <- percentage.correctly.classified(predicted = pred.lasso
+                                          , actual = dat_test[, get("label")])
+  time <- min(1, as.numeric(toc - tic) / 60)
+  proportion <- dat_train[get("name") == samplename, .N] / nrow(train)
+  outcome <- list(proportion, time
+                  , 1-correct.pct.lasso
+                  , pred.lasso, pred.train.lasso)
+  return(outcome)
+}
+```
+
+```{r load_model6,eval=TRUE, tidy=TRUE}
+prop.lasso <- c()
+time.lasso <- c()
+error.lasso <- c()
+predict.lasso <- matrix(NA, nrow = nrow(test), ncol = 9)
+predict.train.lasso <- list()
+for (i in 1:length(sample)){
+  outcome <- lasso.regression(dat_train = dat.total
+                              , dat_test = test
+                              , samplename = sample[i])
+  prop.lasso[i] <- outcome[[1]]
+  time.lasso[i] <- outcome[[2]]
+  error.lasso[i] <- outcome[[3]]
+  predict.lasso[,i] <- outcome[[4]]
+  predict.train.lasso[i] <- list(outcome[[5]])
+}
+Points.lasso <- 0.25 * prop.lasso + 0.25 * time.lasso + 0.5 * error.lasso
+# generate report
+results.lasso <- model.results(prop.lasso, time.lasso
+                               , error.lasso
+                               , Points.lasso
+                               , "Lasso Regression")
+# datatable(results.lasso[[2]])
+```
+
+Lasso regression tries to find \(argmin_{\beta}(Y-X^T\beta)^2+\lambda|\beta|\). Lasso regression has similar character as ridge regression. The difference is that it changes all the coefficients of irrelevant and dependent variables to 0. I choose lasso regression as one of the method because I want to see the difference of the outcomes between lasso and ridge regression. Based on the observations above, I see that the error rate of lasso regression is very large when the sample size is 500 and it decreases a lot when the sample size changes to 2000. It is possible that lasso has better performance that ridge dealing with large samples.
+
+### Model 7: K-Nearest Neighbors
+
+```{r code_model7_development, eval = TRUE, tidy=TRUE}
+knn.res = function(dat_train, dat_test
+                   , kmean, samplename){
+  train.mod.data = dat_train[get("name") == samplename, -c("label", "name")]
+  test.mod.data = dat_test[, -1]
+  train.label = unlist(dat_train[get("name") == samplename, 1])
+  test.label = unlist(dat_test[, 1])
+  #model
+  tic = Sys.time()
+  pred = knn(train = train.mod.data
+             , test = test.mod.data
+             , cl = train.label, k = kmean)
+  pred.train = knn(train = train.mod.data
+                   , test = train.mod.data
+                   , cl = train.label, k = kmean)
+  toc = Sys.time()
+  
+  proportion = dat_train[get("name") == samplename, .N] / nrow(train)
+  time = min(1, as.numeric(toc - tic) / 60)
+  error = mean(as.character(pred) != test.label)
+  outcome = list(proportion, time, error
+                  , pred, pred.train)
+  return(outcome)
+}
+```
+
+
+```{r load_model7, tidy=TRUE}
+prop.knn <- c()
+time.knn <- c()
+error.knn <- c()
+predict.knn <- matrix(NA, nrow = nrow(test), ncol = 9)
+predict.train.knn <- list()
+for (i in 1:length(sample)){
+  outcome <- knn.res(dat_train = dat.total, dat_test = test, kmean = 5, samplename = sample[i])
+  prop.knn[i] <- outcome[[1]]
+  time.knn[i] <- outcome[[2]]
+  error.knn[i] <- outcome[[3]]
+  predict.knn[,i] <- outcome[[4]]
+  predict.train.knn[i] <- list(outcome[[5]])
+}
+Points.knn = 0.25 * prop.knn + 0.25 * time.knn + 0.5 * error.knn
+
+# generate report
+results.KNN = model.results(prop.knn, time.knn
+                            , error.knn, Points.knn 
+                            ,"K-Nearest Neighbors")
+
+# datatable(results.KNN[[2]])
+```
+
+The K-Nearest Neighbors is a supervised learning model that used to classify the unclassified vector according to the categories of the K-nearest vectors of itself. The \(K\) is a custom constant and the distances between the unclassified vector and its neighbors are calculated in Euclidean distance. As a result, the unclassified vector would be classifed to the category which the majority of neighbor vectors belong to.
+
+The advantages of KNN are simpleness, easy to retrain, not sensitive to outliers, and high accuracy on data that has different categories of sample staggered distributed. However, data with small sample size or unequal sample size in each category may lower the accuracy of the model. Also, KNN has relatively higher time complexity and space complexity, since it has to calculate all the distances between each sample.
+
+In the project, we have \(K = 5\), since we have 10 categories in the training dataset. Normally, \(1 < K < n\), which \(K\) is an integer and \(n\) is the number of the training intances. If \(K = 1\), the model may be overfitting; if \(K = n\) or too close to \(n\), the model may be underfitting.
+
+### Model 8: Classification Tree
+
+```{r code_model8_development, eval = TRUE, tidy=TRUE}
+ctree.res = function(dat_train, dat_test, samplename) {
+  train.mod.data = dat_train[get("name") == samplename, -"name"]
+  test.label = unlist(dat_test[, 1])
+  # model
+  tic = Sys.time()
+  ctree.model = rpart(label ~ ., data = train.mod.data, method = "class")
+  trControl = trainControl(method = "cv", number = 10)
+  tuneGrid = expand.grid(.cp = seq(0, 0.1, 0.001))
+  trainCV = train(label ~ ., data = train.mod.data, method = "rpart", trControl = trControl, tuneGrid = tuneGrid)
+  ctree.cv.model = rpart(label ~ ., data = train.mod.data, method = "class", control = rpart.control(cp = trainCV$bestTune))
+  pred = predict(ctree.cv.model, newdata = dat_test, type = "class")
+  pred.train = predict(ctree.cv.model, newdata = train.mod.data[,2:50], type = "class")
+  toc = Sys.time()
+  
+  proportion = dat_train[get("name") == samplename, .N] / nrow(train)
+  time = min(1, as.numeric(toc - tic) / 60)
+  error = mean(as.character(pred) != test.label)
+  outcome = list(proportion, time, error, pred, pred.train)
+  return(outcome)
+}
+```
+
+```{r load_model8, tidy=TRUE}
+prop.ctree <- c()
+time.ctree <- c()
+error.ctree <- c()
+predict.ctree <- matrix(NA,nrow = nrow(test),ncol = 9)
+predict.train.ctree <- list()
+for (i in 1:length(sample)){
+  outcome = ctree.res(dat_train = dat.total
+                       , dat_test = test
+                       , samplename = sample[i])
+  prop.ctree[i] = outcome[[1]]
+  time.ctree[i] = outcome[[2]]
+  error.ctree[i] = outcome[[3]]
+  predict.ctree[,i] <- outcome[[4]]
+  predict.train.ctree[i] <- list(outcome[[5]])
+}
+Points.ctree = 0.25 * prop.ctree + 0.25 * time.ctree + 0.5 * error.ctree
+
+# generate report
+results.classification = model.results(prop.ctree, time.ctree
+                                       , error.ctree, Points.ctree 
+                                       , "Classification Tree")
+
+# datatable(results.classification[[2]])
+```
+
+The classification tree is a supervised learning model that use binominal attributes to classify samples into different groups. The model is not only suitable to build a non-linear regression but also is a non-parametric regression, therefore it does not require the sample to be a linear or normal distribution. The advantages of the model include high interpretability and low running time. The disadvantages of the model is that the error rate can increase significantly when encounter dataset with too many categories. In addition, ordinal data often needs plenty of preparations before inputed in the model.
+
+In order to avoid the classification tree be overfitted, we often do tree pruning and k-fold cross validation. The tree pruning is to have the model to consider the result in the near future while doing classification. The k-fold cross validation is to resample the sample into k portions and re-evaluate the model. Mostly, k is set as 5 or 10.
+
+We only used k-fold cross validation to improve the accuracy of our classification tree model, because the optimal cp value for tree pruning in our model is 0.01, which is same as the default cp value before pruning.
+
+### Model 9: Generalized Boosted Regression Models
+```{r code_model9_development, eval = TRUE, tidy = TRUE}
+xgb.res <- function(dat_train, dat_test, samplename) {
+  # Create data and labels
+  train.dat = dat_train[get("name") == samplename, -"name"]
+  train.label = as.numeric(as.factor(train.dat$label)) - 1
+  test.label = as.numeric(as.factor(dat_test$label)) - 1
+  # Prepare data
+  train.mod.data = as.matrix(train.dat[, -"label"])
+  test.mod.data = as.matrix(dat_test[, -"label"])
+  # Prepare dmatrix
+  xgb.train = xgb.DMatrix(data = train.mod.data, label = train.label)
+  xgb.test = xgb.DMatrix(data = test.mod.data, label = test.label)
+  #Set parameters
+  num_class = length(unique(train.label))
+  params = list("objective" = "multi:softprob", "eval_metric" = "mlogloss", "num_class" = num_class)
+  # Model
+  tic = Sys.time()
+  xgb.model = xgb.train(params = params, data = xgb.train, nrounds = 100)
+  # Prediction
+  xgb.pred.train = predict(xgb.model, newdata = xgb.train)
+  xgb.pred.test = predict(xgb.model, newdata = xgb.test)
+  toc = Sys.time()
+  # Correct rate
+  test_prediction = matrix(xgb.pred.test, nrow = num_class,
+                          ncol = length(xgb.pred.test) / num_class) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(label = test.label + 1, max_prob = max.col(., "last"))
+  xgbCM = confusionMatrix(factor(test_prediction$max_prob), factor(test_prediction$label), mode = "everything")
+  right.pred = sum(diag(xgbCM$table))
+  
+  proportion.xgb = dat_train[get("name") == samplename, .N] / nrow(train)
+  error.xgb = 1 - (right.pred / nrow(dat_test))
+  time.xgb = min(1, as.numeric(toc - tic) / 60)
+  outcome = c(proportion.xgb, time.xgb, error.xgb, xgb.pred.test, xgb.pred.train)
+  return(outcome)
+}
+```
+
+```{r load_model9, tidy=TRUE}
+prop.xgb <- c()
+time.xgb <- c()
+error.xgb <- c()
+predict.xgb <- matrix(NA,nrow = nrow(test),ncol = 9)
+predict.train.xgb <- list()
+ for (i in 1:length(sample)){
+   outcome <- xgb.res(dat_train = dat.total
+                      , dat_test = test
+                      , samplename = sample[i])
+   prop.xgb[i] <- outcome[[1]]
+   time.xgb[i] <- outcome[[2]]
+   error.xgb[i] <- outcome[[3]]
+   predict.xgb[,i] <- outcome[[4]]
+   predict.train.xgb[i] <- outcome[[5]]
+ }
+ prop.xgb = round.numerics(as.numeric(prop.xgb), digits = 4)
+ time.xgb = round.numerics(as.numeric(time.xgb), digits = 4)
+ error.xgb = round.numerics(as.numeric(error.xgb), digits= 4)
+ Points.xgb = 0.25 * prop.xgb + 0.25 * time.xgb + 0.5 * error.xgb
+
+# generate report
+results.xbg = model.results(prop.xgb, time.xgb
+                            , error.xgb, Points.xgb 
+                            ,"Generalized Boosted Regression Models")
+# datatable(results.xbg[[2]])
+```
+
+The Generalized Boosted Regression is an algorithm that combines gradient descending and boosting. The algorithm generates a group of weak prediction models and then combine them into the final model with weight to raise the accuracy of the final prediction. The weak prediction models act as the negative gradient vector of the loss function of the final model, therefore the loss function can approximate to zero and lower the error rate.
+
+There are many method to implement the generalized boosted regression. In the project, we use XGBoost, since it has not only excellent performance but also very fastt execution speed. Another reason for the popularity of XGBoost is its flexibility on both regression and classification problems.
+
+The XGBoost can be improved by manipulating the parameters in the function. For example, \(eta\) means the step size shrinkage in gradient descending; \(gamma\) means the minimum loss reduction made by the weak models; \(max\_depth\) means the maximum depth of a tree; \(subsample\) means the subsample ratio of the training data; \(colsample\_bytree\) means the subsample ratio of the columns when building a tree (Dataflair Team, 2018). When the model is underfitting, we should increase \(max\_depth\), \(subsample\), and \(colsample\_bytree\), and decrease \(eta\) and \(gamma\) to enhance the model complexity, and vice versa.
+
+In the project, we did not revise any parameter, since the higher the model complexity is, the longer the running time is. We want to keep the score low, hence we sacrificed the accuracy to save time.
+
+### Model 10: Ensembling Model using Random Forest
+
+```{r code_model10_development, eval = TRUE, tidy=TRUE}
+# Ensembling Model using Random Forest
+ensembling.rf <- function(i,dat_train = combines.train.data(i)
+                        ,dat_test.variables = combines.test.data(i)
+                        ,dat_test.response = test[,get("label")]){
+  # fit the model
+  tic <- Sys.time()
+  ensembling.rf.fit <- randomForest(formula = label~.-label
+                     ,data = dat_train)
+  # get the prediction
+  ensembling.rf.p <- predict(object = ensembling.rf.fit
+                ,newdata = dat_test.variables
+                ,type = "response")
+  # calculate prediction error 
+  ensembling.rf.error <- 1-percentage.correctly.classified(ensembling.rf.p
+                                                ,dat_test.response)
+  toc <- Sys.time()
+
+  time <- min(1,as.numeric(toc-tic)/60)
+  proportion <- nrow(dat_train)/nrow(train)
+  outcome <- list(proportion, time, ensembling.rf.error)
+  return(outcome)
+}
+# Ensembling Model by Selecting Mode
+ensembling.mode <- function(i,dat_predict = combines.test.data(i)
+                        ,dat_response = test[,get("label")]) {
+  # get the mode
+  tic <- Sys.time()
+  y.predit <- apply(dat_predict[,1:ncol(dat_predict)],1,row.mode)
+  # calculate prediction error
+  table <- table(pred = y.predit
+                 ,true = as.numeric(as.factor(unlist(test[,1]))))
+  predict.error <- 1 - sum(diag(table))/sum(table)
+  toc <- Sys.time()
+  time <- min(1,as.numeric(toc-tic)/60)
+  return(c(time,predict.error))
+}
+```
+
+
+```{r load_model10, tidy=TRUE}
+prop.ensembling.rf <- c()
+time.ensembling.rf <- c()
+error.ensembling.rf <- c()
+# Ensembling Model using Random Forest
+for (i in 1:length(sample)){
+  outcome <- ensembling.rf (i,dat_train = combines.train.data(i)
+                        ,dat_test.variables = combines.test.data(i)
+                        ,dat_test.response = test[,get("label")])
+  prop.ensembling.rf[i] <- outcome[[1]]
+  time.ensembling.rf[i] <- outcome[[2]]
+  error.ensembling.rf[i] <- outcome[[3]]
+}
+Points.ensembling.rf <- 0.25*prop.ensembling.rf+
+                     0.25*time.ensembling.rf+0.5*error.ensembling.rf
+# generate report
+results.ensembling.rf <- model.results(prop.ensembling.rf
+                                       ,time.ensembling.rf
+                                       ,error.ensembling.rf
+                                       ,Points.ensembling.rf
+                                        ,"Ensembling Model using Random Forest")
+
+# Ensembling Model by Selecting Mode
+prop.ensembling.mode <- c()
+time.ensembling.mode <- c()
+error.ensembling.mode <- c()
+
+for (i in 1:length(sample)){
+  outcome <- ensembling.mode(i,dat_predict = combines.test.data(i)
+                        ,dat_response = test[,get("label")])
+  time.ensembling.mode[i] <- outcome[[1]]
+  error.ensembling.mode[i] <- outcome[[2]]
+}
+prop.ensembling.mode <- prop.knn
+Points.ensembling.mode <- 0.25*prop.ensembling.mode+
+                     0.25*time.ensembling.mode+0.5*error.ensembling.mode
+# generate report
+results.ensembling.mode <- model.results(prop.ensembling.mode
+                                       ,time.ensembling.mode
+                                       ,error.ensembling.mode
+                                       ,Points.ensembling.mode
+                                        ,"Ensembling Model by Selecting Mode")
+```
+
+We build ensembling model based on the predictions of other methods on the testing set. We choose predictions from KNN, SVM, Random Forest, Lasso Regression and Ridge Regression because the predict errors are small compared to Multinomial Logistic Regression and Classification Tree. We regard the predictions of these methods to be categorical data and select the mode of these predictions to be the new predictions on testing dataset. 
+
+This is a quite simple and straightforward model. In order to testing whether this model is suitable in this situation, we build a more complex model by combining the predictions of other methods on the training set to be the input data and using Random Forest to build a new model based on these predictions and real classification on training data. We also choose predictions from KNN, SVM, Random Forest, Lasso Regression and Ridge Regression which is consistent with the ensembling model we mentioned above. Then we combined the predictions of these methods on the testing set to be the input data in the new Random Forest model and get the new predictions on testing dataset. 
+
+```{r,echo=FALSE}
+datatable(rbind(results.ensembling.mode[[2]],results.ensembling.rf[[2]]))
+```
+
+From the scores table, we could see ensembling model by choosing the mode of the predictions from other models has better performance than more complex model like random forest. We would choose this model to be our final ensembling model.
+
+
+
+## Scoreboard
+
+```{r scoreboard}
+datatable(socreboard(2))
+```
+
+
+## Discussion
+
+From the score table, we conclude that the ensembling model using the technique of selecting mode of the predictions from other models performs best among all the methods we use. The reason why it is the best is that it takes very short time to process the whole model while the error rate is low as well. Since it takes all the predictions from other models as input, the size of the dataset is relatively small, which gives this model very low points according to the score function. Within the other nine models which dealing with the original training datasets, random forest has the best performance because it takes very short time to process all the data and the predictions are quite accurate. The model which gets the highest point is support vector machine, mainly because it takes too much time. If the sample size of dataset getting bigger, the weakness of support vector machines may become more obvious.
+
+The technologies of selecting mode and classification tree are the two most time-efficient methods, while Support vector machines takes the longest time which is nearly half a minute to process all the data each time. However, the prediction accuracy of Support vector machines is the best among all of the methods, Classification tree and multinomial logistic model are bad at predicting because the error rate is higher than 30 percent although the processing time of them are very short.
+
+The point function influences a lot to the evaluations of the performances of all the models. Since the sample size of training data we choose is very small, the running factor B differs a lot among all the models. However, if we make the sample size much bigger, the running factor B will become all 1, then B will not influence the total score any more. If we give more weight to the sample size component A or the running time factor B rather than the accuracy C, the models with sample size 500 will have lower scores and those models take less time such as Classification tree, K-Nearest Neighbors and logistic regression will have lower scores as well. We think that it would be great to evaluate the actual practicability of each models if we explore a wider variety of models and sample sizes because different models have different strengths, some are great at dealing with small sample sizes, while some are pressuring highest accuracy.
+
+## References
+Dataflair Team. (2018, November 16). What is XGBoost Algorithm – Applied Machine Learning [web log comment]. Retrieved from https://data-flair.training/blogs/xgboost-algorithm/
+
+Trevor Hastie, Robert Tibshirani, Jerome Friedman(2009). The Elements of Statistical Learning: Data Mining, Inference, and Prediction. Retrieved from https://web.stanford.edu/~hastie/ElemStatLearn//
