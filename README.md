@@ -1,2 +1,2 @@
 # Applied-Data-Science
-These are two projects I did in the Applied Data Scince calss during my study at Columbia University.
+These are several projects I did using basic machine learning models during my study at Columbia University.
